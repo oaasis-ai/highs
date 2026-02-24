@@ -5,7 +5,7 @@ use std::ops::RangeBounds;
 use std::os::raw::c_int;
 
 use crate::matrix_col::ColMatrix;
-use crate::Problem;
+use crate::{Problem, VARTYPE_CONTINUOUS, VARTYPE_INTEGER, VARTYPE_SEMICONTINUOUS};
 
 /// Represents a variable
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -36,7 +36,7 @@ impl Problem<RowMatrix> {
         col_factor: f64,
         bounds: B,
     ) -> Col {
-        self.add_column_with_integrality(col_factor, bounds, false)
+        self.add_column_with_integrality(col_factor, bounds, VARTYPE_CONTINUOUS)
     }
 
     /// Same as add_column, but forces the solution to contain an integer value for this variable.
@@ -45,19 +45,28 @@ impl Problem<RowMatrix> {
         col_factor: f64,
         bounds: B,
     ) -> Col {
-        self.add_column_with_integrality(col_factor, bounds, true)
+        self.add_column_with_integrality(col_factor, bounds, VARTYPE_INTEGER)
     }
 
-    /// Same as add_column, but lets you define whether the new variable should be integral or continuous.
+    /// Same as add_column, but forces the solution to contain a semi continuous value for this variable.
+    pub fn add_semi_continuous_column<N: Into<f64> + Copy, B: RangeBounds<N>>(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+    ) -> Col {
+        self.add_column_with_integrality(col_factor, bounds, VARTYPE_SEMICONTINUOUS)
+    }
+
+    /// Same as add_column, but lets you define the variable type.
     #[inline]
     pub fn add_column_with_integrality<N: Into<f64> + Copy, B: RangeBounds<N>>(
         &mut self,
         col_factor: f64,
         bounds: B,
-        is_integer: bool,
+        var_type: i32,
     ) -> Col {
         let col = Col(self.num_cols());
-        self.add_column_inner(col_factor, bounds, is_integer);
+        self.add_column_inner(col_factor, bounds, var_type);
         self.matrix.columns.push((vec![], vec![]));
         col
     }

@@ -108,6 +108,13 @@
 //! assert_eq!(solved.get_solution().columns(), vec![2.5, 1.]);
 //! ```
 
+/// Defines a continuous variable
+pub const VARTYPE_CONTINUOUS: i32 = 0;
+/// Defines a variable to take on only integer values
+pub const VARTYPE_INTEGER: i32 = 1;
+/// Defines a variable to take on 0 or be bounded [lb,ub]
+pub const VARTYPE_SEMICONTINUOUS: i32 = 2;
+
 use std::convert::{TryFrom, TryInto};
 use std::ffi::{c_void, CString};
 use std::num::TryFromIntError;
@@ -179,13 +186,13 @@ where
         &mut self,
         col_factor: f64,
         bounds: B,
-        is_integral: bool,
+        var_type: i32,
     ) {
-        if is_integral && self.integrality.is_none() {
+        if var_type != VARTYPE_CONTINUOUS && self.integrality.is_none() {
             self.integrality = Some(vec![0; self.num_cols()]);
         }
         if let Some(integrality) = &mut self.integrality {
-            integrality.push(if is_integral { 1 } else { 0 });
+            integrality.push(var_type);
         }
         self.colcost.push(col_factor);
         let low = bound_value(bounds.start_bound()).unwrap_or(f64::NEG_INFINITY);
@@ -458,7 +465,7 @@ impl Model {
         bounds: B,
         row_factors: impl IntoIterator<Item = (Row, f64)>,
     ) -> Col {
-        self.try_add_column_with_integrality(col_factor, bounds, row_factors, false)
+        self.try_add_column_with_integrality(col_factor, bounds, row_factors, VARTYPE_CONTINUOUS)
             .unwrap_or_else(|e| panic!("HiGHS error: {e:?}"))
     }
 
@@ -471,7 +478,7 @@ impl Model {
         bounds: B,
         row_factors: impl IntoIterator<Item = (Row, f64)>,
     ) -> Result<Col, HighsStatus> {
-        self.try_add_column_with_integrality(col_factor, bounds, row_factors, false)
+        self.try_add_column_with_integrality(col_factor, bounds, row_factors, VARTYPE_CONTINUOUS)
     }
 
     /// Same as [`Model::add_column`], but adds an _integer_ column
@@ -481,7 +488,7 @@ impl Model {
         bounds: B,
         row_factors: impl IntoIterator<Item = (Row, f64)>,
     ) -> Col {
-        self.try_add_column_with_integrality(col_factor, bounds, row_factors, true)
+        self.try_add_column_with_integrality(col_factor, bounds, row_factors, VARTYPE_INTEGER)
             .unwrap_or_else(|e| panic!("HiGHS error: {e:?}"))
     }
 
@@ -492,31 +499,50 @@ impl Model {
         bounds: B,
         row_factors: impl IntoIterator<Item = (Row, f64)>,
     ) -> Result<Col, HighsStatus> {
-        self.try_add_column_with_integrality(col_factor, bounds, row_factors, true)
+        self.try_add_column_with_integrality(col_factor, bounds, row_factors, VARTYPE_INTEGER)
     }
 
-    /// Same as [`Model::add_column`], but lets you define whether the new variable should be
-    /// integral or continuous.
+    /// Same as [`Model::add_column`], but adds a _semi-continuous_ column
+    pub fn add_semi_continuous_column<N: Into<f64> + Copy, B: RangeBounds<N>>(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+        row_factors: impl IntoIterator<Item = (Row, f64)>,
+    ) -> Col {
+        self.try_add_column_with_integrality(col_factor, bounds, row_factors, VARTYPE_SEMICONTINUOUS)
+            .unwrap_or_else(|e| panic!("HiGHS error: {e:?}"))
+    }
+
+    /// Same as [`Model::try_add_column`] but adds a _semi-continuous_ column
+    pub fn try_add_semi_continuous_column<N: Into<f64> + Copy, B: RangeBounds<N>>(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+        row_factors: impl IntoIterator<Item = (Row, f64)>,
+    ) -> Result<Col, HighsStatus> {
+        self.try_add_column_with_integrality(col_factor, bounds, row_factors, VARTYPE_SEMICONTINUOUS)
+    }
+
+    /// Same as [`Model::add_column`], but lets you define the variable type.
     #[inline]
     pub fn add_column_with_integrality<N: Into<f64> + Copy, B: RangeBounds<N>>(
         &mut self,
         col_factor: f64,
         bounds: B,
         row_factors: impl IntoIterator<Item = (Row, f64)>,
-        is_integer: bool,
+        var_type: i32,
     ) -> Col {
-        self.try_add_column_with_integrality(col_factor, bounds, row_factors, is_integer)
+        self.try_add_column_with_integrality(col_factor, bounds, row_factors, var_type)
             .unwrap_or_else(|e| panic!("HiGHS error: {e:?}"))
     }
 
-    /// Same as [`Model::try_add_column`] but lets you define whether the new variable should be
-    /// integral or continuous.
+    /// Same as [`Model::try_add_column`] but lets you define the variable type.
     pub fn try_add_column_with_integrality<N, B>(
         &mut self,
         col_factor: f64,
         bounds: B,
         row_factors: impl IntoIterator<Item = (Row, f64)>,
-        is_integer: bool,
+        var_type: i32,
     ) -> Result<Col, HighsStatus>
     where
         N: Into<f64> + Copy,
@@ -534,12 +560,12 @@ impl Model {
                 factors.as_ptr()
             ))?;
         }
-        if is_integer {
+        if var_type != VARTYPE_CONTINUOUS {
             unsafe {
                 highs_call!(Highs_changeColIntegrality(
                     self.highs.mut_ptr(),
                     (self.highs.num_cols()? - 1).try_into().unwrap(),
-                    is_integer.into()
+                    var_type
                 ))?;
             }
         }
