@@ -390,6 +390,7 @@ impl Model {
     /// let mut model = ColProblem::default().optimise(Maximise);
     /// model.set_option("presolve", "off"); // disable the presolver
     /// model.set_option("solver", "ipm"); // use the ipm solver
+    /// model.set_option("solver", "hipo"); // use the HiPO interior-point solver (HiGHS >= 1.14)
     /// model.set_option("time_limit", 30.0); // stop after 30 seconds
     /// model.set_option("parallel", "on"); // use multiple cores
     /// model.set_option("threads", 4); // solve on 4 threads
@@ -1055,6 +1056,25 @@ mod test {
         problem.change_column_bounds(x, 1..);
         let solved = problem.optimise(Sense::Minimise).solve();
         assert_eq!(solved.objective_value(), 1.0);
+    }
+
+    #[test]
+    fn test_hipo_solver() {
+        // Smoke test for HiGHS 1.14's HiPO interior-point solver.
+        // HiGHS falls back to ipx (or simplex) when HiPO is not built in,
+        // so this test should pass whether or not the local highs-sys
+        // build linked Metis + BLAS.
+        let mut p = RowProblem::default();
+        let x = p.add_column(1., 0..);
+        let y = p.add_column(1., 0..);
+        p.add_row(..=10., [(x, 1.), (y, 1.)]);
+        let mut m = Model::new(p);
+        m.make_quiet();
+        m.set_sense(Sense::Maximise);
+        m.set_option("solver", "hipo");
+        let solved = m.solve();
+        assert_eq!(solved.status(), HighsModelStatus::Optimal);
+        assert!((solved.objective_value() - 10.0).abs() < 1e-6);
     }
 
     #[test]

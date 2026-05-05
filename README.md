@@ -42,3 +42,16 @@ fn main() {
     pb.add_row(2.., &[(x, 3.), (y, 8.)]); // 2 <= x*3 + y*8
 }
 ```
+
+## Solvers
+
+HiGHS ships several algorithms; pick one with `set_option("solver", ...)`
+on the `Model` returned by `optimise(...)`. Accepted values include
+`"choose"` (default), `"simplex"`, `"ipm"`, `"ipx"`, `"hipo"`, and `"pdlp"`.
+
+`"hipo"` selects [HiPO](https://ergo-code.github.io/HiGHS/dev/solvers/), the
+factorisation-based interior-point optimizer added in HiGHS 1.14. It is
+multi-threaded and tends to outperform IPX on large sparse instances. HiPO
+is enabled by building `highs-sys` with the `hipo` cargo feature, which
+turns on `-DHIPO=ON` and links against BLAS (Accelerate on macOS, an
+auto-fetched OpenBLAS elsewhere).
