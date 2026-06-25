@@ -4,7 +4,7 @@ use std::convert::TryInto;
 use std::ops::RangeBounds;
 use std::os::raw::c_int;
 
-use crate::Problem;
+use crate::{Integrality, Problem};
 
 /// Represents a constraint
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -93,6 +93,24 @@ impl Problem<ColMatrix> {
         row_factors: I,
         is_integer: bool,
     ) {
+        self.add_column_with_integrality_kind(col_factor, bounds, row_factors, is_integer.into());
+    }
+
+    /// Same as add_column, but lets you set the variable's [`Integrality`]
+    /// (continuous, integer, semicontinuous, or semi-integer).
+    #[inline]
+    pub fn add_column_with_integrality_kind<
+        N: Into<f64> + Copy,
+        B: RangeBounds<N>,
+        ITEM: Borrow<(Row, f64)>,
+        I: IntoIterator<Item = ITEM>,
+    >(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+        row_factors: I,
+        integrality: Integrality,
+    ) {
         self.matrix
             .astart
             .push(self.matrix.aindex.len().try_into().unwrap());
@@ -105,6 +123,54 @@ impl Problem<ColMatrix> {
             self.matrix.aindex.push(row.0);
             self.matrix.avalue.push(factor);
         }
-        self.add_column_inner(col_factor, bounds, is_integer);
+        self.add_column_inner(col_factor, bounds, integrality);
+    }
+
+    /// Add a semicontinuous variable: its value is `0` or within `bounds`.
+    ///
+    /// The lower bound is the threshold below which (other than `0`) the
+    /// variable may not lie. A finite upper bound is recommended by HiGHS,
+    /// though an unbounded upper bound is also accepted.
+    pub fn add_semi_continuous_column<
+        N: Into<f64> + Copy,
+        B: RangeBounds<N>,
+        ITEM: Borrow<(Row, f64)>,
+        I: IntoIterator<Item = ITEM>,
+    >(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+        row_factors: I,
+    ) {
+        self.add_column_with_integrality_kind(
+            col_factor,
+            bounds,
+            row_factors,
+            Integrality::SemiContinuous,
+        );
+    }
+
+    /// Add a semi-integer variable: its value is `0` or an integer within `bounds`.
+    ///
+    /// The lower bound is the threshold below which (other than `0`) the
+    /// variable may not lie. A finite upper bound is recommended by HiGHS,
+    /// though an unbounded upper bound is also accepted.
+    pub fn add_semi_integer_column<
+        N: Into<f64> + Copy,
+        B: RangeBounds<N>,
+        ITEM: Borrow<(Row, f64)>,
+        I: IntoIterator<Item = ITEM>,
+    >(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+        row_factors: I,
+    ) {
+        self.add_column_with_integrality_kind(
+            col_factor,
+            bounds,
+            row_factors,
+            Integrality::SemiInteger,
+        );
     }
 }

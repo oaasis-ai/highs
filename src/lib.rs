@@ -178,13 +178,16 @@ where
         &mut self,
         col_factor: f64,
         bounds: B,
-        is_integral: bool,
+        integrality: Integrality,
     ) {
-        if is_integral && self.integrality.is_none() {
-            self.integrality = Some(vec![0; self.num_cols()]);
+        let raw = integrality.as_raw();
+        // Only allocate the integrality vector once a non-continuous column
+        // appears. A pure-LP problem keeps it `None` and uses `Highs_passLp`.
+        if raw != VAR_TYPE_CONTINUOUS && self.integrality.is_none() {
+            self.integrality = Some(vec![VAR_TYPE_CONTINUOUS; self.num_cols()]);
         }
-        if let Some(integrality) = &mut self.integrality {
-            integrality.push(if is_integral { 1 } else { 0 });
+        if let Some(existing) = &mut self.integrality {
+            existing.push(raw);
         }
         self.colcost.push(col_factor);
         let low = bound_value(bounds.start_bound()).unwrap_or(f64::NEG_INFINITY);
@@ -263,6 +266,47 @@ pub struct Model {
 #[derive(Debug)]
 pub struct SolvedModel {
     highs: HighsPtr,
+}
+
+/// The kind of values a variable (column) may take.
+///
+/// For [`SemiContinuous`](Integrality::SemiContinuous) and
+/// [`SemiInteger`](Integrality::SemiInteger) variables, the value is either `0`
+/// or lies within the column's `[lower, upper]` bounds.
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, Default)]
+pub enum Integrality {
+    /// Any real value within the column bounds.
+    #[default]
+    Continuous,
+    /// Any integer value within the column bounds.
+    Integer,
+    /// Either `0` or any real value within the column bounds.
+    SemiContinuous,
+    /// Either `0` or any integer value within the column bounds.
+    SemiInteger,
+}
+
+impl Integrality {
+    fn as_raw(self) -> HighsInt {
+        match self {
+            Integrality::Continuous => VAR_TYPE_CONTINUOUS,
+            Integrality::Integer => VAR_TYPE_INTEGER,
+            Integrality::SemiContinuous => VAR_TYPE_SEMI_CONTINUOUS,
+            Integrality::SemiInteger => VAR_TYPE_SEMI_INTEGER,
+        }
+    }
+}
+
+impl From<bool> for Integrality {
+    /// `true` maps to [`Integrality::Integer`] and `false` to
+    /// [`Integrality::Continuous`].
+    fn from(is_integer: bool) -> Self {
+        if is_integer {
+            Integrality::Integer
+        } else {
+            Integrality::Continuous
+        }
+    }
 }
 
 /// Whether to maximize or minimize the objective function
@@ -632,6 +676,27 @@ impl Model {
         N: Into<f64> + Copy,
         B: RangeBounds<N>,
     {
+        self.try_add_column_with_integrality_kind(
+            col_factor,
+            bounds,
+            row_factors,
+            is_integer.into(),
+        )
+    }
+
+    /// Same as [`Model::try_add_column`] but lets you set the column's
+    /// [`Integrality`] (continuous, integer, semicontinuous, or semi-integer).
+    pub fn try_add_column_with_integrality_kind<N, B>(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+        row_factors: impl IntoIterator<Item = (Row, f64)>,
+        integrality: Integrality,
+    ) -> Result<Col, HighsStatus>
+    where
+        N: Into<f64> + Copy,
+        B: RangeBounds<N>,
+    {
         let (rows, factors): (Vec<_>, Vec<_>) = row_factors.into_iter().unzip();
         unsafe {
             highs_call!(Highs_addCol(
@@ -644,17 +709,96 @@ impl Model {
                 factors.as_ptr()
             ))?;
         }
-        if is_integer {
+        let raw = integrality.as_raw();
+        if raw != VAR_TYPE_CONTINUOUS {
             unsafe {
                 highs_call!(Highs_changeColIntegrality(
                     self.highs.mut_ptr(),
                     (self.highs.num_cols()? - 1).try_into().unwrap(),
-                    is_integer.into()
+                    raw
                 ))?;
             }
         }
 
         Ok(Col(self.highs.num_cols()? - 1))
+    }
+
+    /// Same as [`Model::add_column`] but lets you set the column's
+    /// [`Integrality`] (continuous, integer, semicontinuous, or semi-integer).
+    ///
+    /// # Panics
+    ///
+    /// If HiGHS returns an error status value.
+    #[inline]
+    pub fn add_column_with_integrality_kind<N: Into<f64> + Copy, B: RangeBounds<N>>(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+        row_factors: impl IntoIterator<Item = (Row, f64)>,
+        integrality: Integrality,
+    ) -> Col {
+        self.try_add_column_with_integrality_kind(col_factor, bounds, row_factors, integrality)
+            .unwrap_or_else(|e| panic!("HiGHS error: {e:?}"))
+    }
+
+    /// Add a semicontinuous variable: its value is `0` or within `bounds`.
+    ///
+    /// # Panics
+    ///
+    /// If HiGHS returns an error status value.
+    pub fn add_semi_continuous_column<N: Into<f64> + Copy, B: RangeBounds<N>>(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+        row_factors: impl IntoIterator<Item = (Row, f64)>,
+    ) -> Col {
+        self.try_add_semi_continuous_column(col_factor, bounds, row_factors)
+            .unwrap_or_else(|e| panic!("HiGHS error: {e:?}"))
+    }
+
+    /// Add a semicontinuous variable: its value is `0` or within `bounds`.
+    pub fn try_add_semi_continuous_column<N: Into<f64> + Copy, B: RangeBounds<N>>(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+        row_factors: impl IntoIterator<Item = (Row, f64)>,
+    ) -> Result<Col, HighsStatus> {
+        self.try_add_column_with_integrality_kind(
+            col_factor,
+            bounds,
+            row_factors,
+            Integrality::SemiContinuous,
+        )
+    }
+
+    /// Add a semi-integer variable: its value is `0` or an integer within `bounds`.
+    ///
+    /// # Panics
+    ///
+    /// If HiGHS returns an error status value.
+    pub fn add_semi_integer_column<N: Into<f64> + Copy, B: RangeBounds<N>>(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+        row_factors: impl IntoIterator<Item = (Row, f64)>,
+    ) -> Col {
+        self.try_add_semi_integer_column(col_factor, bounds, row_factors)
+            .unwrap_or_else(|e| panic!("HiGHS error: {e:?}"))
+    }
+
+    /// Add a semi-integer variable: its value is `0` or an integer within `bounds`.
+    pub fn try_add_semi_integer_column<N: Into<f64> + Copy, B: RangeBounds<N>>(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+        row_factors: impl IntoIterator<Item = (Row, f64)>,
+    ) -> Result<Col, HighsStatus> {
+        self.try_add_column_with_integrality_kind(
+            col_factor,
+            bounds,
+            row_factors,
+            Integrality::SemiInteger,
+        )
     }
 
     /// Updates the cost of a column
@@ -1396,5 +1540,84 @@ mod test {
         let cols = solved.get_solution().columns().to_vec();
         assert!((cols[0] - 0.5).abs() < 1e-6, "x = {}", cols[0]);
         assert!((cols[1] - 0.5).abs() < 1e-6, "y = {}", cols[1]);
+    }
+
+    #[test]
+    fn test_semi_continuous_column() {
+        use crate::status::HighsModelStatus::Optimal;
+        // min x  s.t.  x >= 3,  x in {0} U [5, 10].
+        let mut pb = RowProblem::new();
+        let x = pb.add_semi_continuous_column(1., 5.0..=10.0);
+        pb.add_row(3.., [(x, 1.)]);
+        let solved = pb.optimise(Sense::Minimise).solve();
+        assert_eq!(solved.status(), Optimal);
+        let cols = solved.get_solution().columns().to_vec();
+        assert!((cols[0] - 5.0).abs() < 1e-6, "x = {}", cols[0]);
+    }
+
+    #[test]
+    fn test_semi_continuous_column_off() {
+        use crate::status::HighsModelStatus::Optimal;
+        // min x with x in {0} U [5, 10] and nothing forcing it on => x = 0.
+        let mut pb = RowProblem::new();
+        let _x = pb.add_semi_continuous_column(1., 5.0..=10.0);
+        let solved = pb.optimise(Sense::Minimise).solve();
+        assert_eq!(solved.status(), Optimal);
+        assert!(
+            solved.objective_value().abs() < 1e-9,
+            "obj = {}",
+            solved.objective_value()
+        );
+    }
+
+    #[test]
+    fn test_semi_integer_column() {
+        use crate::status::HighsModelStatus::Optimal;
+        // max x  s.t.  x <= 7.5,  x in {0} U {5, 6, ..., 10}.
+        let mut pb = RowProblem::new();
+        let x = pb.add_semi_integer_column(1., 5.0..=10.0);
+        pb.add_row(..=7.5, [(x, 1.)]);
+        let solved = pb.optimise(Sense::Maximise).solve();
+        assert_eq!(solved.status(), Optimal);
+        let cols = solved.get_solution().columns().to_vec();
+        assert!((cols[0] - 7.0).abs() < 1e-6, "x = {}", cols[0]);
+    }
+
+    #[test]
+    fn test_semi_continuous_col_problem() {
+        use crate::status::HighsModelStatus::Optimal;
+        let mut pb = ColProblem::new();
+        let c = pb.add_row(3..); // x >= 3
+        pb.add_semi_continuous_column(1., 5.0..=10.0, [(c, 1.)]);
+        let solved = pb.optimise(Sense::Minimise).solve();
+        assert_eq!(solved.status(), Optimal);
+        let cols = solved.get_solution().columns().to_vec();
+        assert!((cols[0] - 5.0).abs() < 1e-6, "x = {}", cols[0]);
+    }
+
+    #[test]
+    fn test_semi_integer_col_incremental() {
+        use crate::status::HighsModelStatus::Optimal;
+        let mut model = ColProblem::new().optimise(Sense::Maximise);
+        let x = model.add_semi_integer_column(1., 5.0..=10.0, vec![]);
+        model.add_row(..=7.5, [(x, 1.)]);
+        let solved = model.solve();
+        assert_eq!(solved.status(), Optimal);
+        let cols = solved.get_solution().columns().to_vec();
+        assert!((cols[0] - 7.0).abs() < 1e-6, "x = {}", cols[0]);
+    }
+
+    #[test]
+    fn test_try_add_semi_continuous_column() {
+        use crate::status::HighsModelStatus::Optimal;
+        let mut model = ColProblem::new().optimise(Sense::Minimise);
+        let x = model
+            .try_add_semi_continuous_column(1., 5.0..=10.0, vec![])
+            .expect("add semi-continuous column");
+        model.add_row(3.., [(x, 1.)]);
+        let solved = model.solve();
+        assert_eq!(solved.status(), Optimal);
+        let cols = solved.get_solution().columns().to_vec();
+        assert!((cols[0] - 5.0).abs() < 1e-6, "x = {}", cols[0]);
     }
 }

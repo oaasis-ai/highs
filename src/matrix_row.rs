@@ -5,7 +5,7 @@ use std::ops::RangeBounds;
 use std::os::raw::c_int;
 
 use crate::matrix_col::ColMatrix;
-use crate::Problem;
+use crate::{Integrality, Problem};
 
 /// Represents a variable
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -56,10 +56,48 @@ impl Problem<RowMatrix> {
         bounds: B,
         is_integer: bool,
     ) -> Col {
+        self.add_column_with_integrality_kind(col_factor, bounds, is_integer.into())
+    }
+
+    /// Same as add_column, but lets you set the variable's [`Integrality`]
+    /// (continuous, integer, semicontinuous, or semi-integer).
+    #[inline]
+    pub fn add_column_with_integrality_kind<N: Into<f64> + Copy, B: RangeBounds<N>>(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+        integrality: Integrality,
+    ) -> Col {
         let col = Col(self.num_cols());
-        self.add_column_inner(col_factor, bounds, is_integer);
+        self.add_column_inner(col_factor, bounds, integrality);
         self.matrix.columns.push((vec![], vec![]));
         col
+    }
+
+    /// Add a semicontinuous variable: its value is `0` or within `bounds`.
+    ///
+    /// The lower bound is the threshold below which (other than `0`) the
+    /// variable may not lie. A finite upper bound is recommended by HiGHS,
+    /// though an unbounded upper bound is also accepted.
+    pub fn add_semi_continuous_column<N: Into<f64> + Copy, B: RangeBounds<N>>(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+    ) -> Col {
+        self.add_column_with_integrality_kind(col_factor, bounds, Integrality::SemiContinuous)
+    }
+
+    /// Add a semi-integer variable: its value is `0` or an integer within `bounds`.
+    ///
+    /// The lower bound is the threshold below which (other than `0`) the
+    /// variable may not lie. A finite upper bound is recommended by HiGHS,
+    /// though an unbounded upper bound is also accepted.
+    pub fn add_semi_integer_column<N: Into<f64> + Copy, B: RangeBounds<N>>(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+    ) -> Col {
+        self.add_column_with_integrality_kind(col_factor, bounds, Integrality::SemiInteger)
     }
 
     /// Add a constraint to the problem.
