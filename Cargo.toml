@@ -9,5 +9,5 @@ repository = "https://github.com/rust-or/highs"
 keywords = ["linear-programming", "optimization", "math", "solver"]
 
 [dependencies]
-highs-sys = { git = "https://github.com/oaasis-ai/highs-sys.git", rev = "0d186a462792be95c0f4c24a9822b55bc6ba50fa", features = ["hipo"] }
+highs-sys = { git = "https://github.com/oaasis-ai/highs-sys.git", rev = "cbe83132c8e8c8edb640582be9e26e5010b7ed41", features = ["hipo"] }
 log = "0.4.27"
