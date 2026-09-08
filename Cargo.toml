@@ -1,6 +1,6 @@
 [package]
 name = "highs"
-version = "2.1.0"
+version = "2.4.0"
 authors = ["Ophir LOJKINE", "rust-or"]
 edition = "2021"
 description = "Safe rust bindings for the HiGHS linear programming solver. See http://highs.dev."
@@ -9,5 +9,5 @@ repository = "https://github.com/rust-or/highs"
 keywords = ["linear-programming", "optimization", "math", "solver"]
 
 [dependencies]
-highs-sys = { git = "https://github.com/oaasis-ai/highs-sys.git", rev = "ef8a45822d8ef7122558f22286b6a180e693db33", features = ["hipo"] }
+highs-sys = { git = "https://github.com/oaasis-ai/highs-sys.git", rev = "570a539fbf2699a6408fdfb9a7f29eacfa9a9c71", features = ["hipo"] }
 log = "0.4.27"

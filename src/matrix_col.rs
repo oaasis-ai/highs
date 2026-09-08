@@ -4,7 +4,7 @@ use std::convert::TryInto;
 use std::ops::RangeBounds;
 use std::os::raw::c_int;
 
-use crate::{Problem, VARTYPE_CONTINUOUS, VARTYPE_INTEGER};
+use crate::{Integrality, Problem};
 
 /// Represents a constraint
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -52,7 +52,7 @@ impl Problem<ColMatrix> {
         bounds: B,
         row_factors: I,
     ) {
-        self.add_column_with_integrality(col_factor, bounds, row_factors, VARTYPE_CONTINUOUS);
+        self.add_column_with_integrality(col_factor, bounds, row_factors, false);
     }
 
     /// Same as add_column, but forces the solution to contain an integer value for this variable.
@@ -76,10 +76,10 @@ impl Problem<ColMatrix> {
         bounds: B,
         row_factors: I,
     ) {
-        self.add_column_with_integrality(col_factor, bounds, row_factors, VARTYPE_INTEGER);
+        self.add_column_with_integrality(col_factor, bounds, row_factors, true);
     }
 
-    /// Same as add_column, but lets you define the variable type.
+    /// Same as add_column, but lets you define whether the new variable should be integral or continuous.
     #[inline]
     pub fn add_column_with_integrality<
         N: Into<f64> + Copy,
@@ -91,7 +91,25 @@ impl Problem<ColMatrix> {
         col_factor: f64,
         bounds: B,
         row_factors: I,
-        var_type: i32,
+        is_integer: bool,
+    ) {
+        self.add_column_with_integrality_kind(col_factor, bounds, row_factors, is_integer.into());
+    }
+
+    /// Same as add_column, but lets you set the variable's [`Integrality`]
+    /// (continuous, integer, semicontinuous, or semi-integer).
+    #[inline]
+    pub fn add_column_with_integrality_kind<
+        N: Into<f64> + Copy,
+        B: RangeBounds<N>,
+        ITEM: Borrow<(Row, f64)>,
+        I: IntoIterator<Item = ITEM>,
+    >(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+        row_factors: I,
+        integrality: Integrality,
     ) {
         self.matrix
             .astart
@@ -105,6 +123,54 @@ impl Problem<ColMatrix> {
             self.matrix.aindex.push(row.0);
             self.matrix.avalue.push(factor);
         }
-        self.add_column_inner(col_factor, bounds, var_type);
+        self.add_column_inner(col_factor, bounds, integrality);
+    }
+
+    /// Add a semicontinuous variable: its value is `0` or within `bounds`.
+    ///
+    /// The lower bound is the threshold below which (other than `0`) the
+    /// variable may not lie. A finite upper bound is recommended by HiGHS,
+    /// though an unbounded upper bound is also accepted.
+    pub fn add_semi_continuous_column<
+        N: Into<f64> + Copy,
+        B: RangeBounds<N>,
+        ITEM: Borrow<(Row, f64)>,
+        I: IntoIterator<Item = ITEM>,
+    >(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+        row_factors: I,
+    ) {
+        self.add_column_with_integrality_kind(
+            col_factor,
+            bounds,
+            row_factors,
+            Integrality::SemiContinuous,
+        );
+    }
+
+    /// Add a semi-integer variable: its value is `0` or an integer within `bounds`.
+    ///
+    /// The lower bound is the threshold below which (other than `0`) the
+    /// variable may not lie. A finite upper bound is recommended by HiGHS,
+    /// though an unbounded upper bound is also accepted.
+    pub fn add_semi_integer_column<
+        N: Into<f64> + Copy,
+        B: RangeBounds<N>,
+        ITEM: Borrow<(Row, f64)>,
+        I: IntoIterator<Item = ITEM>,
+    >(
+        &mut self,
+        col_factor: f64,
+        bounds: B,
+        row_factors: I,
+    ) {
+        self.add_column_with_integrality_kind(
+            col_factor,
+            bounds,
+            row_factors,
+            Integrality::SemiInteger,
+        );
     }
 }
