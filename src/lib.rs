@@ -314,9 +314,20 @@ impl std::fmt::Debug for Model {
 }
 
 /// A solved model
-#[derive(Debug)]
 pub struct SolvedModel {
     highs: HighsPtr,
+    /// The interrupt callback the solve ran with, if any. HiGHS still holds a
+    /// raw pointer into this box, so it has to outlive the `Model` that
+    /// installed it — dropping it here and re-solving calls freed memory.
+    interrupt: Option<Box<InterruptFn>>,
+}
+
+impl std::fmt::Debug for SolvedModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SolvedModel")
+            .field("highs", &self.highs)
+            .finish()
+    }
 }
 
 /// Whether to maximize or minimize the objective function
@@ -417,7 +428,10 @@ impl Model {
                     problem.matrix.avalue.as_ptr()
                 ))
             }
-            .map(|_| Self { highs, interrupt: None })
+            .map(|_| Self {
+                highs,
+                interrupt: None,
+            })
         }
     }
 
@@ -448,14 +462,25 @@ impl Model {
     /// Consulted at every MIP limit check; returning `true` interrupts the
     /// solve, which then ends with `HighsModelStatus::ReachedInterrupt` and
     /// its incumbent.
+    /// The closure may be called from a HiGHS worker thread, so it must not
+    /// assume the caller's thread.
     pub fn set_mip_interrupt(&mut self, f: impl FnMut(&MipProgress) -> bool + Send + 'static) {
+        // Registering the new box before dropping the old one: HiGHS holds a raw
+        // pointer to whichever is installed.
         let mut boxed: Box<InterruptFn> = Box::new(Box::new(f));
         let data = &mut *boxed as *mut InterruptFn as *mut c_void;
         unsafe {
-            highs_call!(Highs_setCallback(self.highs.mut_ptr(), Some(interrupt_trampoline), data))
-                .expect("HiGHS error: set callback");
-            highs_call!(Highs_startCallback(self.highs.mut_ptr(), CALLBACK_MIP_INTERRUPT))
-                .expect("HiGHS error: start callback");
+            highs_call!(Highs_setCallback(
+                self.highs.mut_ptr(),
+                Some(interrupt_trampoline),
+                data
+            ))
+            .expect("HiGHS error: set callback");
+            highs_call!(Highs_startCallback(
+                self.highs.mut_ptr(),
+                CALLBACK_MIP_INTERRUPT
+            ))
+            .expect("HiGHS error: start callback");
         }
         self.interrupt = Some(boxed);
     }
@@ -467,8 +492,11 @@ impl Model {
 
     /// Find the optimal value for the problem, return an error if the problem is incoherent
     pub fn try_solve(mut self) -> Result<SolvedModel, HighsStatus> {
-        unsafe { highs_call!(Highs_run(self.highs.mut_ptr())) }
-            .map(|_| SolvedModel { highs: self.highs })
+        let interrupt = self.interrupt.take();
+        unsafe { highs_call!(Highs_run(self.highs.mut_ptr())) }.map(|_| SolvedModel {
+            highs: self.highs,
+            interrupt,
+        })
     }
 
     /// Adds a new constraint to the highs model.
@@ -571,8 +599,13 @@ impl Model {
         bounds: B,
         row_factors: impl IntoIterator<Item = (Row, f64)>,
     ) -> Col {
-        self.try_add_column_with_integrality(col_factor, bounds, row_factors, VARTYPE_SEMICONTINUOUS)
-            .unwrap_or_else(|e| panic!("HiGHS error: {e:?}"))
+        self.try_add_column_with_integrality(
+            col_factor,
+            bounds,
+            row_factors,
+            VARTYPE_SEMICONTINUOUS,
+        )
+        .unwrap_or_else(|e| panic!("HiGHS error: {e:?}"))
     }
 
     /// Same as [`Model::try_add_column`] but adds a _semi-continuous_ column
@@ -582,7 +615,12 @@ impl Model {
         bounds: B,
         row_factors: impl IntoIterator<Item = (Row, f64)>,
     ) -> Result<Col, HighsStatus> {
-        self.try_add_column_with_integrality(col_factor, bounds, row_factors, VARTYPE_SEMICONTINUOUS)
+        self.try_add_column_with_integrality(
+            col_factor,
+            bounds,
+            row_factors,
+            VARTYPE_SEMICONTINUOUS,
+        )
     }
 
     /// Same as [`Model::add_column`], but lets you define the variable type.
@@ -738,7 +776,7 @@ impl From<SolvedModel> for Model {
     fn from(solved: SolvedModel) -> Self {
         Self {
             highs: solved.highs,
-            interrupt: None,
+            interrupt: solved.interrupt,
         }
     }
 }
@@ -850,6 +888,19 @@ impl SolvedModel {
         try_handle_status(status, "Highs_getIntInfoValue")
             .map(|_| HighsSolutionStatus::try_from(*solution_status).unwrap())
             .unwrap()
+    }
+
+    /// An integer entry of HiGHS's info record (e.g. `simplex_iteration_count`,
+    /// `mip_node_count`), `None` if HiGHS has no such entry.
+    pub fn int_info(&self, name: &str) -> Option<i64> {
+        let name = CString::new(name).ok()?;
+        let mut value: HighsInt = 0;
+        let status = unsafe {
+            Highs_getIntInfoValue(self.highs.unsafe_mut_ptr(), name.as_ptr(), &mut value)
+        };
+        try_handle_status(status, "Highs_getIntInfoValue")
+            .ok()
+            .map(|_| i64::from(value))
     }
 
     /// Get the solution to the problem
