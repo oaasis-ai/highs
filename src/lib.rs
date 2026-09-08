@@ -296,7 +296,13 @@ unsafe extern "C" fn interrupt_trampoline(
         dual_bound: o.mip_dual_bound,
         node_count: o.mip_node_count,
     };
-    if f(&progress) {
+    // A panic must not reach the `extern "C"` frame: unwinding out of it aborts
+    // the process, from a HiGHS worker thread and with the solve half-done. A
+    // panicking callback is read as "interrupt" — the caller is in no state to
+    // keep going, and stopping hands them back the incumbent.
+    let interrupt =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&progress))).unwrap_or(true);
+    if interrupt {
         unsafe { (*input).user_interrupt = 1 };
     }
 }
@@ -888,19 +894,6 @@ impl SolvedModel {
         try_handle_status(status, "Highs_getIntInfoValue")
             .map(|_| HighsSolutionStatus::try_from(*solution_status).unwrap())
             .unwrap()
-    }
-
-    /// An integer entry of HiGHS's info record (e.g. `simplex_iteration_count`,
-    /// `mip_node_count`), `None` if HiGHS has no such entry.
-    pub fn int_info(&self, name: &str) -> Option<i64> {
-        let name = CString::new(name).ok()?;
-        let mut value: HighsInt = 0;
-        let status = unsafe {
-            Highs_getIntInfoValue(self.highs.unsafe_mut_ptr(), name.as_ptr(), &mut value)
-        };
-        try_handle_status(status, "Highs_getIntInfoValue")
-            .ok()
-            .map(|_| i64::from(value))
     }
 
     /// Get the solution to the problem
