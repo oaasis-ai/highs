@@ -261,16 +261,79 @@ macro_rules! highs_call {
     }
 }
 
+/// What HiGHS reports to a MIP interrupt callback.
+#[derive(Clone, Copy, Debug)]
+pub struct MipProgress {
+    /// Seconds since the solve started.
+    pub running_time: f64,
+    /// Objective of the best incumbent so far (`inf` if none).
+    pub primal_bound: f64,
+    /// Best proven bound so far.
+    pub dual_bound: f64,
+    /// Branch-and-bound nodes processed.
+    pub node_count: i64,
+}
+
+type InterruptFn = Box<dyn FnMut(&MipProgress) -> bool + Send>;
+
+const CALLBACK_MIP_INTERRUPT: c_int = 6;
+
+unsafe extern "C" fn interrupt_trampoline(
+    kind: c_int,
+    _message: *const std::os::raw::c_char,
+    out: *const HighsCallbackDataOut,
+    input: *mut HighsCallbackDataIn,
+    user: *mut c_void,
+) {
+    if kind != CALLBACK_MIP_INTERRUPT || out.is_null() || input.is_null() || user.is_null() {
+        return;
+    }
+    let f = unsafe { &mut *(user as *mut InterruptFn) };
+    let o = unsafe { &*out };
+    let progress = MipProgress {
+        running_time: o.running_time,
+        primal_bound: o.mip_primal_bound,
+        dual_bound: o.mip_dual_bound,
+        node_count: o.mip_node_count,
+    };
+    // A panic must not reach the `extern "C"` frame: unwinding out of it aborts
+    // the process, from a HiGHS worker thread and with the solve half-done. A
+    // panicking callback is read as "interrupt" — the caller is in no state to
+    // keep going, and stopping hands them back the incumbent.
+    let interrupt =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&progress))).unwrap_or(true);
+    if interrupt {
+        unsafe { (*input).user_interrupt = 1 };
+    }
+}
+
 /// A model to solve
-#[derive(Debug)]
 pub struct Model {
     highs: HighsPtr,
+    interrupt: Option<Box<InterruptFn>>,
+}
+
+impl std::fmt::Debug for Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Model").field("highs", &self.highs).finish()
+    }
 }
 
 /// A solved model
-#[derive(Debug)]
 pub struct SolvedModel {
     highs: HighsPtr,
+    /// The interrupt callback the solve ran with, if any. HiGHS still holds a
+    /// raw pointer into this box, so it has to outlive the `Model` that
+    /// installed it — dropping it here and re-solving calls freed memory.
+    interrupt: Option<Box<InterruptFn>>,
+}
+
+impl std::fmt::Debug for SolvedModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SolvedModel")
+            .field("highs", &self.highs)
+            .finish()
+    }
 }
 
 /// Whether to maximize or minimize the objective function
@@ -371,7 +434,10 @@ impl Model {
                     problem.matrix.avalue.as_ptr()
                 ))
             }
-            .map(|_| Self { highs })
+            .map(|_| Self {
+                highs,
+                interrupt: None,
+            })
         }
     }
 
@@ -399,6 +465,32 @@ impl Model {
         self.highs.set_option(option, value)
     }
 
+    /// Consulted at every MIP limit check; returning `true` interrupts the
+    /// solve, which then ends with `HighsModelStatus::ReachedInterrupt` and
+    /// its incumbent.
+    /// The closure may be called from a HiGHS worker thread, so it must not
+    /// assume the caller's thread.
+    pub fn set_mip_interrupt(&mut self, f: impl FnMut(&MipProgress) -> bool + Send + 'static) {
+        // Registering the new box before dropping the old one: HiGHS holds a raw
+        // pointer to whichever is installed.
+        let mut boxed: Box<InterruptFn> = Box::new(Box::new(f));
+        let data = &mut *boxed as *mut InterruptFn as *mut c_void;
+        unsafe {
+            highs_call!(Highs_setCallback(
+                self.highs.mut_ptr(),
+                Some(interrupt_trampoline),
+                data
+            ))
+            .expect("HiGHS error: set callback");
+            highs_call!(Highs_startCallback(
+                self.highs.mut_ptr(),
+                CALLBACK_MIP_INTERRUPT
+            ))
+            .expect("HiGHS error: start callback");
+        }
+        self.interrupt = Some(boxed);
+    }
+
     /// Find the optimal value for the problem, panic if the problem is incoherent
     pub fn solve(self) -> SolvedModel {
         self.try_solve().expect("HiGHS error: invalid problem")
@@ -406,8 +498,11 @@ impl Model {
 
     /// Find the optimal value for the problem, return an error if the problem is incoherent
     pub fn try_solve(mut self) -> Result<SolvedModel, HighsStatus> {
-        unsafe { highs_call!(Highs_run(self.highs.mut_ptr())) }
-            .map(|_| SolvedModel { highs: self.highs })
+        let interrupt = self.interrupt.take();
+        unsafe { highs_call!(Highs_run(self.highs.mut_ptr())) }.map(|_| SolvedModel {
+            highs: self.highs,
+            interrupt,
+        })
     }
 
     /// Adds a new constraint to the highs model.
@@ -510,8 +605,13 @@ impl Model {
         bounds: B,
         row_factors: impl IntoIterator<Item = (Row, f64)>,
     ) -> Col {
-        self.try_add_column_with_integrality(col_factor, bounds, row_factors, VARTYPE_SEMICONTINUOUS)
-            .unwrap_or_else(|e| panic!("HiGHS error: {e:?}"))
+        self.try_add_column_with_integrality(
+            col_factor,
+            bounds,
+            row_factors,
+            VARTYPE_SEMICONTINUOUS,
+        )
+        .unwrap_or_else(|e| panic!("HiGHS error: {e:?}"))
     }
 
     /// Same as [`Model::try_add_column`] but adds a _semi-continuous_ column
@@ -521,7 +621,12 @@ impl Model {
         bounds: B,
         row_factors: impl IntoIterator<Item = (Row, f64)>,
     ) -> Result<Col, HighsStatus> {
-        self.try_add_column_with_integrality(col_factor, bounds, row_factors, VARTYPE_SEMICONTINUOUS)
+        self.try_add_column_with_integrality(
+            col_factor,
+            bounds,
+            row_factors,
+            VARTYPE_SEMICONTINUOUS,
+        )
     }
 
     /// Same as [`Model::add_column`], but lets you define the variable type.
@@ -677,6 +782,7 @@ impl From<SolvedModel> for Model {
     fn from(solved: SolvedModel) -> Self {
         Self {
             highs: solved.highs,
+            interrupt: solved.interrupt,
         }
     }
 }
