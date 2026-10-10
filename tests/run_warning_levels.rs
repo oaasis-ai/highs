@@ -67,8 +67,9 @@ const ROWS: usize = 6;
 const COLS: usize = 60;
 
 /// A market split whose rows have over/under slack, minimising the slack. All
-/// binaries at zero with full under-slack is feasible, so a warm start gives an
-/// incumbent from the first node, and the split is far too hard to prove.
+/// binaries at zero with full under-slack is feasible, so the warm start is the
+/// incumbent before the MIP solver starts its clock (`HighsMipSolver`'s
+/// constructor), and the split is far too hard to prove.
 fn slack_split_with_incumbent() -> Model {
     let w = weights(0x9E37_79B9_7F4A_7C15, ROWS, COLS);
     let mut problem = RowProblem::default();
@@ -120,7 +121,7 @@ fn hard_split_without_incumbent() -> Model {
 #[test]
 fn time_limit_stop_with_an_incumbent_logs_highs_run_at_debug_only() {
     let mut model = slack_split_with_incumbent();
-    model.set_option("time_limit", 0.05);
+    model.set_option("time_limit", 0.0);
 
     let (solved, records) = solve_capturing(model);
 
