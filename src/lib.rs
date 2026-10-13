@@ -120,6 +120,7 @@ use highs_sys::*;
 pub use matrix_col::{ColMatrix, Row};
 pub use matrix_row::{Col, RowMatrix};
 pub use options::{HighsOptionValue, TrySetOptionError};
+use status::InvalidStatus;
 pub use status::{HighsModelStatus, HighsSolutionStatus, HighsStatus};
 
 /// A problem where variables are declared first, and constraints are then added dynamically.
@@ -645,7 +646,15 @@ impl Model {
     /// Find the optimal value for the problem, return an error if the problem is incoherent
     pub fn try_solve(mut self) -> Result<SolvedModel, HighsStatus> {
         let interrupt = self.interrupt.take();
-        unsafe { highs_call!(Highs_run(self.highs.mut_ptr())) }.map(|_| SolvedModel {
+        let status = status_from_raw(unsafe { Highs_run(self.highs.mut_ptr()) })?;
+        if status == HighsStatus::Warning {
+            let (level, message) = run_warning_record(
+                self.highs.model_status().map_err(|e| format!("{e:?}")),
+                self.highs.primal_solution_status(),
+            );
+            log::log!(level, "{message}");
+        }
+        Ok(SolvedModel {
             highs: self.highs,
             interrupt,
         })
@@ -1169,6 +1178,23 @@ impl HighsPtr {
         }
     }
 
+    fn model_status(&self) -> Result<HighsModelStatus, InvalidStatus> {
+        HighsModelStatus::try_from(unsafe { Highs_getModelStatus(self.unsafe_mut_ptr()) })
+    }
+
+    fn primal_solution_status(&self) -> Result<HighsSolutionStatus, String> {
+        let mut value: HighsInt = -1;
+        let status = unsafe {
+            Highs_getIntInfoValue(
+                self.unsafe_mut_ptr(),
+                c"primal_solution_status".as_ptr(),
+                &mut value,
+            )
+        };
+        status_from_raw(status).map_err(|e| format!("{e:?}"))?;
+        HighsSolutionStatus::try_from(value).map_err(|e| format!("{e:?}"))
+    }
+
     /// Number of variables
     fn num_cols(&self) -> Result<usize, TryFromIntError> {
         let n = unsafe { Highs_getNumCols(self.0) };
@@ -1202,8 +1228,7 @@ impl SolvedModel {
 
     /// The model status of the solution. Should be Optimal if everything went well.
     pub fn status(&self) -> HighsModelStatus {
-        let model_status = unsafe { Highs_getModelStatus(self.highs.unsafe_mut_ptr()) };
-        HighsModelStatus::try_from(model_status).unwrap()
+        self.highs.model_status().unwrap()
     }
 
     /// The mip gap of the solution. Should be 0.0 if an optimal solution was
@@ -1362,17 +1387,84 @@ impl Index<Col> for Solution {
     }
 }
 
-fn try_handle_status(status: c_int, msg: &str) -> Result<HighsStatus, HighsStatus> {
+fn status_from_raw(status: c_int) -> Result<HighsStatus, HighsStatus> {
     let status_enum = HighsStatus::try_from(status)
         .expect("HiGHS returned an unexpected status value. Please report it as a bug to https://github.com/rust-or/highs/issues");
     match status_enum {
-        status @ HighsStatus::OK => Ok(status),
-        status @ HighsStatus::Warning => {
-            log::warn!("HiGHS emitted a warning: {msg}");
-            Ok(status)
-        }
-        error => Err(error),
+        HighsStatus::Error => Err(HighsStatus::Error),
+        ok_or_warning => Ok(ok_or_warning),
     }
+}
+
+fn try_handle_status(status: c_int, msg: &str) -> Result<HighsStatus, HighsStatus> {
+    let status = status_from_raw(status)?;
+    if status == HighsStatus::Warning {
+        log::warn!("HiGHS emitted a warning: {msg}");
+    }
+    Ok(status)
+}
+
+/// A limit or interrupt stop that kept a feasible incumbent is a budgeted solve ending normally.
+fn classify_run_warning(
+    status: HighsModelStatus,
+    has_incumbent: bool,
+) -> (log::Level, &'static str) {
+    use HighsModelStatus::*;
+    let is_limit = matches!(
+        status,
+        ReachedTimeLimit
+            | ReachedIterationLimit
+            | ReachedSolutionLimit
+            | ObjectiveBound
+            | ObjectiveTarget
+    );
+    match status {
+        _ if is_limit && has_incumbent => (
+            log::Level::Debug,
+            "stopped at a limit with a feasible incumbent",
+        ),
+        _ if is_limit => (
+            log::Level::Warn,
+            "stopped at a limit without a feasible solution",
+        ),
+        ReachedInterrupt if has_incumbent => {
+            (log::Level::Debug, "interrupted with a feasible incumbent")
+        }
+        ReachedInterrupt => (log::Level::Warn, "interrupted without a feasible solution"),
+        ReachedMemoryLimit => (log::Level::Warn, "reached the memory limit"),
+        Unknown => (
+            log::Level::Warn,
+            "HiGHS could not determine the model status",
+        ),
+        _ => (log::Level::Warn, "the model status is not a limit stop"),
+    }
+}
+
+fn run_warning_record(
+    model_status: Result<HighsModelStatus, String>,
+    primal_status: Result<HighsSolutionStatus, String>,
+) -> (log::Level, String) {
+    let (level, model_status, reason) = match (model_status, primal_status) {
+        (Err(e), _) => (
+            log::Level::Warn,
+            "unreadable".to_string(),
+            format!("could not read the model status: {e}"),
+        ),
+        (Ok(status), Err(e)) => (
+            log::Level::Warn,
+            format!("{status:?}"),
+            format!("could not read the primal solution status: {e}"),
+        ),
+        (Ok(status), Ok(primal)) => {
+            let has_incumbent = primal == HighsSolutionStatus::Feasible;
+            let (level, reason) = classify_run_warning(status, has_incumbent);
+            (level, format!("{status:?}"), reason.to_string())
+        }
+    };
+    (
+        level,
+        format!("HiGHS emitted a warning: Highs_run model_status={model_status} reason={reason:?}"),
+    )
 }
 
 #[cfg(test)]
@@ -1715,5 +1807,175 @@ mod test {
         assert_eq!(solved.status(), Optimal);
         let cols = solved.get_solution().columns().to_vec();
         assert!((cols[0] - 5.0).abs() < 1e-6, "x = {}", cols[0]);
+    }
+
+    struct CapturingLogger {
+        records: std::sync::Mutex<Vec<(std::thread::ThreadId, log::Level, String)>>,
+    }
+
+    impl log::Log for CapturingLogger {
+        fn enabled(&self, _: &log::Metadata) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record) {
+            self.records.lock().unwrap().push((
+                std::thread::current().id(),
+                record.level(),
+                record.args().to_string(),
+            ));
+        }
+
+        fn flush(&self) {}
+    }
+
+    static LOGGER: CapturingLogger = CapturingLogger {
+        records: std::sync::Mutex::new(Vec::new()),
+    };
+
+    // The logger is process-global and tests share the process, so each test
+    // keeps only the records its own thread emitted.
+    fn run_records_of(model: Model) -> (SolvedModel, Vec<(log::Level, String)>) {
+        let _ = log::set_logger(&LOGGER);
+        log::set_max_level(log::LevelFilter::Trace);
+        let solved = model
+            .try_solve()
+            .expect("Highs_run returns a warning, not an error");
+        let me = std::thread::current().id();
+        let records = LOGGER
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(thread, _, message)| *thread == me && message.contains("Highs_run"))
+            .map(|(_, level, message)| (*level, message.clone()))
+            .collect();
+        (solved, records)
+    }
+
+    fn knapsack_with_incumbent() -> Model {
+        let mut problem = RowProblem::default();
+        let items: Vec<Col> = [(5., 4.), (4., 3.), (3., 2.), (7., 5.), (6., 4.)]
+            .iter()
+            .map(|&(value, _)| problem.add_integer_column(value, 0..=1))
+            .collect();
+        let weights = [4., 3., 2., 5., 4.];
+        problem.add_row(..=9, items.iter().copied().zip(weights));
+        let mut model = problem.optimise(Sense::Maximise);
+        model.make_quiet();
+        model.set_option("presolve", "off");
+        model.set_option("mip_max_lp_iterations", 1);
+        model.set_solution(Some(&[0., 0., 1., 0., 0.]), None, None, None);
+        model
+    }
+
+    #[test]
+    fn run_warning_classifies_every_model_status() {
+        use HighsModelStatus::*;
+        let statuses: Vec<HighsModelStatus> = (-64..64)
+            .filter_map(|raw| HighsModelStatus::try_from(raw).ok())
+            .collect();
+        assert_eq!(statuses.len(), 19);
+
+        for status in statuses {
+            let is_limit_or_interrupt = match status {
+                ReachedTimeLimit
+                | ReachedIterationLimit
+                | ReachedSolutionLimit
+                | ObjectiveBound
+                | ObjectiveTarget
+                | ReachedInterrupt => true,
+                NotSet
+                | LoadError
+                | ModelError
+                | PresolveError
+                | SolveError
+                | PostsolveError
+                | ModelEmpty
+                | Infeasible
+                | UnboundedOrInfeasible
+                | Unbounded
+                | Optimal
+                | Unknown
+                | ReachedMemoryLimit => false,
+            };
+            let (with_incumbent, _) = classify_run_warning(status, true);
+            let (without_incumbent, reason) = classify_run_warning(status, false);
+
+            let expected = if is_limit_or_interrupt {
+                log::Level::Debug
+            } else {
+                log::Level::Warn
+            };
+            assert_eq!(with_incumbent, expected, "{status:?}");
+            assert_eq!(without_incumbent, log::Level::Warn, "{status:?}");
+            assert!(!reason.is_empty(), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn run_warning_status_read_failure_keeps_warn_with_the_error() {
+        let (level, message) = run_warning_record(
+            Err("bad model status".into()),
+            Ok(HighsSolutionStatus::Feasible),
+        );
+        assert_eq!(level, log::Level::Warn);
+        assert!(message.contains("Highs_run"), "{message}");
+        assert!(message.contains("bad model status"), "{message}");
+
+        let (level, message) = run_warning_record(
+            Ok(HighsModelStatus::ReachedTimeLimit),
+            Err("bad primal status".into()),
+        );
+        assert_eq!(level, log::Level::Warn);
+        assert!(
+            message.contains("model_status=ReachedTimeLimit"),
+            "{message}"
+        );
+        assert!(message.contains("bad primal status"), "{message}");
+    }
+
+    #[test]
+    fn run_warning_limit_stop_with_incumbent_logs_at_debug() {
+        let (solved, records) = run_records_of(knapsack_with_incumbent());
+
+        assert_eq!(
+            solved.primal_solution_status(),
+            HighsSolutionStatus::Feasible
+        );
+        assert_eq!(solved.status(), HighsModelStatus::ReachedIterationLimit);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].0, log::Level::Debug, "{records:?}");
+        assert!(
+            records[0].1.contains("model_status=ReachedIterationLimit"),
+            "{records:?}"
+        );
+    }
+
+    #[test]
+    fn run_warning_limit_stop_without_incumbent_logs_warn_with_reason() {
+        let mut problem = RowProblem::default();
+        let x = problem.add_column(1., 0..);
+        let y = problem.add_column(1., 0..);
+        problem.add_row(1.., [(x, 1.), (y, 2.)]);
+        let mut model = problem.optimise(Sense::Minimise);
+        model.make_quiet();
+        model.set_option("presolve", "off");
+        model.set_option("simplex_iteration_limit", 0);
+
+        let (solved, records) = run_records_of(model);
+
+        assert_eq!(solved.status(), HighsModelStatus::ReachedIterationLimit);
+        assert_ne!(
+            solved.primal_solution_status(),
+            HighsSolutionStatus::Feasible
+        );
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].0, log::Level::Warn, "{records:?}");
+        assert!(
+            records[0].1.contains("model_status=ReachedIterationLimit"),
+            "{records:?}"
+        );
+        assert!(records[0].1.contains("reason="), "{records:?}");
     }
 }
