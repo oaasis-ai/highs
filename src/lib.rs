@@ -1865,6 +1865,8 @@ mod test {
         model.make_quiet();
         model.set_option("presolve", "off");
         model.set_option("mip_max_lp_iterations", 1);
+        // Feasibility jump runs before the first LP and finds this optimum.
+        model.set_option("mip_heuristic_run_feasibility_jump", false);
         model.set_solution(Some(&[0., 0., 1., 0., 0.]), None, None, None);
         model
     }
