@@ -52,6 +52,8 @@ pub enum HighsModelStatus {
     ReachedInterrupt = MODEL_STATUS_REACHED_INTERRUPT as isize,
     /// reached memory limit
     ReachedMemoryLimit = MODEL_STATUS_REACHED_MEMORY_LIMIT as isize,
+    /// stopped by a concurrent MIP instance
+    InterruptedByHighs = MODEL_STATUS_HIGHS_INTERRUPT as isize,
 }
 
 /// This error should never happen: an unexpected status was returned
@@ -94,6 +96,7 @@ impl TryFrom<c_int> for HighsModelStatus {
             MODEL_STATUS_REACHED_SOLUTION_LIMIT => Ok(Self::ReachedSolutionLimit),
             MODEL_STATUS_REACHED_INTERRUPT => Ok(Self::ReachedInterrupt),
             MODEL_STATUS_REACHED_MEMORY_LIMIT => Ok(Self::ReachedMemoryLimit),
+            MODEL_STATUS_HIGHS_INTERRUPT => Ok(Self::InterruptedByHighs),
             n => Err(InvalidStatus(n)),
         }
     }
