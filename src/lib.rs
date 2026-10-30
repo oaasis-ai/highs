@@ -1427,10 +1427,12 @@ fn classify_run_warning(
             log::Level::Warn,
             "stopped at a limit without a feasible solution",
         ),
-        ReachedInterrupt if has_incumbent => {
+        ReachedInterrupt | InterruptedByHighs if has_incumbent => {
             (log::Level::Debug, "interrupted with a feasible incumbent")
         }
-        ReachedInterrupt => (log::Level::Warn, "interrupted without a feasible solution"),
+        ReachedInterrupt | InterruptedByHighs => {
+            (log::Level::Warn, "interrupted without a feasible solution")
+        }
         ReachedMemoryLimit => (log::Level::Warn, "reached the memory limit"),
         Unknown => (
             log::Level::Warn,
@@ -1877,7 +1879,7 @@ mod test {
         let statuses: Vec<HighsModelStatus> = (-64..64)
             .filter_map(|raw| HighsModelStatus::try_from(raw).ok())
             .collect();
-        assert_eq!(statuses.len(), 19);
+        assert_eq!(statuses.len(), 20);
 
         for status in statuses {
             let is_limit_or_interrupt = match status {
@@ -1886,7 +1888,8 @@ mod test {
                 | ReachedSolutionLimit
                 | ObjectiveBound
                 | ObjectiveTarget
-                | ReachedInterrupt => true,
+                | ReachedInterrupt
+                | InterruptedByHighs => true,
                 NotSet
                 | LoadError
                 | ModelError
