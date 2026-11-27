@@ -1542,6 +1542,42 @@ mod test {
     }
 
     #[test]
+    fn set_solution_accepts_a_bound_infeasible_start() {
+        // Since HiGHS 1.16, `Highs_setSolution` checks a full start against the
+        // column bounds and answers a violation with a warning, which must not
+        // turn into an error: the start is still used, or discarded by the MIP
+        // solver, and the solve goes on.
+        use crate::status::HighsModelStatus::Optimal;
+        use crate::{RowProblem, Sense};
+        let mut problem = RowProblem::default();
+        let items: Vec<Col> = [5., 4., 3., 7., 6.]
+            .iter()
+            .map(|&value| problem.add_integer_column(value, 0..=1))
+            .collect();
+        problem.add_row(..=9, items.iter().copied().zip([4., 3., 2., 5., 4.]));
+        let mut model = problem.optimise(Sense::Maximise);
+        model.make_quiet();
+        let _ = log::set_logger(&LOGGER);
+        log::set_max_level(log::LevelFilter::Trace);
+        assert_eq!(
+            model.try_set_solution(Some(&[2., 0., 0., 0., 0.]), None, None, None),
+            Ok(())
+        );
+        let me = std::thread::current().id();
+        assert!(LOGGER
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(thread, level, message)| {
+                *thread == me && *level == log::Level::Warn && message.contains("Highs_setSolution")
+            }));
+        let solved = model.solve();
+        assert_eq!(solved.status(), Optimal);
+        assert_eq!(solved.objective_value(), 13.);
+    }
+
+    #[test]
     fn test_mip_gap() {
         use crate::status::HighsModelStatus::Optimal;
         use crate::{Model, RowProblem, Sense};
